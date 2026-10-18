@@ -1,0 +1,154 @@
+# 发布工作流：提交 v* 版本 tag 时，自动打包 Windows / macOS / Linux 三端产物并上传到 GitHub Releases
+#
+# 用法：
+#   git tag v1.0.0
+#   git push origin v1.0.0
+# 完成后在仓库 Releases 页面即可下载各平台安装包。
+# 也支持手动触发：Actions 页面 → Release Build → Run workflow。
+
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  # 先创建 Release（仅 tag 触发时），三个构建任务完成后将产物追加上传
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: M3U8 下载器 ${{ github.ref_name }}
+          body: |
+            ## M3U8 下载器 ${{ github.ref_name }}
+
+            - Windows x64：`desk-m3u8-windows-amd64.zip`
+            - macOS Apple Silicon：`desk-m3u8-darwin-arm64.zip`
+            - macOS Intel：`desk-m3u8-darwin-amd64.zip`
+            - Linux x64：`desk-m3u8-linux-amd64.tar.gz`
+
+            下载对应平台压缩包，解压后直接运行（Windows 为 exe、macOS 为 .app、Linux 为可执行文件）。
+          draft: false
+          prerelease: false
+
+  release:
+    name: Build ${{ matrix.artifact }}
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows (x64)
+          - os: windows
+            runs-on: windows-latest
+            target: windows/amd64
+            artifact: desk-m3u8-windows-amd64
+            ext: .zip
+          # macOS（在一个 macOS runner 上同时构建 arm64 与 amd64）
+          - os: macos
+            runs-on: macos-latest
+            target: darwin
+            artifact: desk-m3u8-darwin
+            ext: .zip
+          # Linux (x64)
+          - os: linux
+            runs-on: ubuntu-22.04
+            target: linux/amd64
+            artifact: desk-m3u8-linux-amd64
+            ext: .tar.gz
+    runs-on: ${{ matrix.runs-on }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # ---- 构建 ----
+      - name: Build (${{ matrix.target }})
+        if: matrix.os != 'macos'
+        run: wails build -clean -platform ${{ matrix.target }}
+
+      # macOS 双架构：先构建 arm64 移出 build/bin，再构建 amd64
+      - name: Build macOS (arm64 + amd64)
+        if: matrix.os == 'macos'
+        run: |
+          wails build -clean -platform darwin/arm64
+          mv build/bin/desk-m3u8.app ./desk-m3u8-arm64.app
+          wails build -clean -platform darwin/amd64
+          mv build/bin/desk-m3u8.app ./desk-m3u8-amd64.app
+
+      # ---- 打包 ----
+      - name: Package Windows
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path build/bin/desk-m3u8.exe -DestinationPath "${{ matrix.artifact }}${{ matrix.ext }}" -Force
+
+      - name: Package macOS
+        if: matrix.os == 'macos'
+        run: |
+          zip -r -y "${{ matrix.artifact }}-arm64.zip" desk-m3u8-arm64.app
+          zip -r -y "${{ matrix.artifact }}-amd64.zip" desk-m3u8-amd64.app
+
+      - name: Package Linux
+        if: matrix.os == 'linux'
+        run: |
+          cd build/bin
+          tar -czf "../../${{ matrix.artifact }}${{ matrix.ext }}" desk-m3u8
+
+      # ---- 上传资产到已创建的 Release ----
+      - name: Upload Windows asset
+        if: matrix.os == 'windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}${{ matrix.ext }}
+
+      - name: Upload macOS assets
+        if: matrix.os == 'macos'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desk-m3u8-darwin-arm64.zip
+            desk-m3u8-darwin-amd64.zip
+
+      - name: Upload Linux asset
+        if: matrix.os == 'linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}${{ matrix.ext }}

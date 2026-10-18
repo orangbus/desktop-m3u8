@@ -1,0 +1,23 @@
+# ---- 构建产物 ----
+build/bin/
+
+# ---- 前端依赖与构建输出 ----
+node_modules/
+frontend/dist/
+
+# ---- 参考仓库与设计资产（不纳入版本管理）----
+.ref_m3u8/
+.creative-design/
+
+# ---- IDE 配置 ----
+.idea/
+.vscode/
+
+# ---- 下载输出与临时文件 ----
+downloads/
+.tmp/
+
+# ---- 系统文件 ----
+Thumbs.db
+.DS_Store
+*.log
