@@ -4,6 +4,7 @@ export namespace core {
 	    maxConcurrentTasks: number;
 	    concurrencyPerTask: number;
 	    savePath: string;
+	    apiPort: number;
 	    apiBaseUrl: string;
 	    apiKey: string;
 	
@@ -16,6 +17,7 @@ export namespace core {
 	        this.maxConcurrentTasks = source["maxConcurrentTasks"];
 	        this.concurrencyPerTask = source["concurrencyPerTask"];
 	        this.savePath = source["savePath"];
+	        this.apiPort = source["apiPort"];
 	        this.apiBaseUrl = source["apiBaseUrl"];
 	        this.apiKey = source["apiKey"];
 	    }

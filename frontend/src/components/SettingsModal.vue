@@ -9,6 +9,7 @@ const form = reactive({
   maxConcurrentTasks: 3,
   concurrencyPerTask: 10,
   savePath: '',
+  apiPort: 52323,
 })
 const error = ref('')
 const saving = ref(false)
@@ -22,6 +23,7 @@ watch(
       form.maxConcurrentTasks = s.maxConcurrentTasks
       form.concurrencyPerTask = s.concurrencyPerTask
       form.savePath = s.savePath || ''
+      form.apiPort = s.apiPort || 52323
     }
   }
 )
@@ -39,6 +41,7 @@ async function save() {
       maxConcurrentTasks: form.maxConcurrentTasks,
       concurrencyPerTask: form.concurrencyPerTask,
       savePath: form.savePath,
+      apiPort: Number(form.apiPort) || 52323,
     })
     emit('saved')
     emit('close')
@@ -91,6 +94,14 @@ async function save() {
           <input v-model="form.savePath" class="input" placeholder="选择或输入保存目录" spellcheck="false" />
           <button class="folder-btn" @click="pickFolder">📁</button>
         </div>
+      </div>
+
+      <div class="row">
+        <div class="row-label">
+          <div class="row-title">API 下载端口</div>
+          <div class="row-sub">接口提交下载的本地监听端口（1-65535，保存后立即生效）</div>
+        </div>
+        <input v-model.number="form.apiPort" class="port-input" type="number" min="1" max="65535" placeholder="52323" />
       </div>
 
       <p v-if="error" class="error">{{ error }}</p>
@@ -197,6 +208,22 @@ async function save() {
 }
 .num-input:focus {
   border-color: var(--accent);
+}
+.port-input {
+  width: 110px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  background: #fafbfc;
+  outline: none;
+}
+.port-input:focus {
+  border-color: var(--accent);
+  background: #fff;
 }
 .path-picker {
   display: flex;

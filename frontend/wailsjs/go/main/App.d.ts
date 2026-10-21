@@ -4,13 +4,21 @@ import {core} from '../models';
 
 export function AddDownload(arg1:string,arg2:string,arg3:Record<string, string>):Promise<core.Task>;
 
+export function BatchCancel(arg1:Array<string>):Promise<void>;
+
+export function BatchRemove(arg1:Array<string>,arg2:boolean):Promise<void>;
+
 export function CancelTask(arg1:string):Promise<void>;
 
 export function ChooseFolder():Promise<string>;
 
+export function CopyText(arg1:string):Promise<void>;
+
 export function GetSettings():Promise<core.Settings>;
 
 export function GetTasks():Promise<Array<core.Task>>;
+
+export function OpenFolder(arg1:string):Promise<void>;
 
 export function PauseTask(arg1:string):Promise<void>;
 
@@ -21,3 +29,5 @@ export function ResumeTask(arg1:string):Promise<void>;
 export function RetryTask(arg1:string):Promise<void>;
 
 export function SaveSettings(arg1:core.Settings):Promise<void>;
+
+export function Shutdown():Promise<void>;

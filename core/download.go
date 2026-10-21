@@ -37,9 +37,9 @@ func parseAndFetch(ctx context.Context, m3u8URL string, headers map[string]strin
 		return nil, err
 	}
 
-	// 处理 Master playlist：取第一个子流再解析
-	if sub, ok := ParseMasterURI(string(text)); ok {
-		return parseAndFetch(ctx, ResolveURL(base, sub), headers)
+	// 处理 Master playlist：选择分辨率最高（无分辨率按码率最高）的子流再解析
+	if variants, ok := ParseMasterVariants(string(text)); ok {
+		return parseAndFetch(ctx, ResolveURL(base, bestVariant(variants).URI), headers)
 	}
 
 	pl, err := ParseM3U8(string(text))
@@ -124,8 +124,9 @@ func (t *Task) downloadSegments(res *ParseResult, onProgress func()) error {
 		default:
 		}
 		segPath := filepath.Join(t.dir, fmt.Sprintf("%d.ts", idx))
-		if _, err := os.Stat(segPath); err == nil {
-			// 已下载，跳过（断点续传）
+		// 已下载（文件存在且非空）则跳过——这就是断点续传的“已下分片记录”。
+		// 重试时无需重头开始，只补下缺失分片。
+		if fi, err := os.Stat(segPath); err == nil && fi.Size() > 0 {
 			n := done.Add(1)
 			t.setDoneSegs(int(n))
 			if onProgress != nil {
@@ -233,6 +234,8 @@ func (t *Task) merge(onProgress func()) (string, error) {
 			continue
 		}
 		if _, err := w.Write(data); err != nil {
+			// 合并中断：清理残留的半成品文件，避免删除任务时留下孤儿文件
+			_ = os.Remove(out)
 			return "", err
 		}
 		t.setDoneSegs(i + 1)
@@ -241,6 +244,7 @@ func (t *Task) merge(onProgress func()) (string, error) {
 		}
 	}
 	if err := w.Flush(); err != nil {
+		_ = os.Remove(out)
 		return "", err
 	}
 	// 清理临时分片目录

@@ -103,25 +103,74 @@ func ParseM3U8(text string) (*Playlist, error) {
 
 var errMasterPlaylist = errors.New("master playlist")
 
-// ParseMasterURI 当 m3u8 是 Master（多码率）时，返回第一个子流地址。
-// 返回 (子流地址, true) 表示是 master；返回 ("", false) 表示不是 master。
-func ParseMasterURI(text string) (string, bool) {
+// Variant 一个 Master（多码率）播放列表中的子流。
+type Variant struct {
+	URI       string // 子流地址（可能相对）
+	Bandwidth int64  // 码率（BANDWIDTH）
+	Width     int    // 分辨率宽（RESOLUTION=1920x1080 的 1920），无则 0
+	Height    int    // 分辨率高
+}
+
+// ParseMasterVariants 解析 Master（多码率）播放列表，返回全部子流。
+// 返回 (子流列表, true) 表示是 master；返回 (nil, false) 表示不是 master。
+func ParseMasterVariants(text string) ([]Variant, bool) {
 	lines := strings.Split(text, "\n")
-	var pending bool
+	variants := make([]Variant, 0, 4)
+	var pending map[string]string
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if strings.HasPrefix(line, "#EXT-X-STREAM-INF") {
-			pending = true
+			pending = parseLineParams(line)
 			continue
 		}
-		if pending {
+		if pending != nil {
 			if line != "" && !strings.HasPrefix(line, "#") {
-				return line, true
+				variants = append(variants, variantFromParams(pending, line))
 			}
-			pending = false
+			pending = nil
 		}
 	}
-	return "", false
+	if len(variants) == 0 {
+		return nil, false
+	}
+	return variants, true
+}
+
+// variantFromParams 由 STREAM-INF 参数与子流地址构造 Variant。
+func variantFromParams(p map[string]string, uri string) Variant {
+	v := Variant{URI: uri}
+	v.Bandwidth, _ = strconv.ParseInt(p["BANDWIDTH"], 10, 64)
+	if res := strings.ToLower(strings.TrimSpace(p["RESOLUTION"])); res != "" {
+		if idx := strings.IndexByte(res, 'x'); idx > 0 {
+			if w, err := strconv.Atoi(strings.TrimSpace(res[:idx])); err == nil && w > 0 {
+				v.Width = w
+			}
+			if h, err := strconv.Atoi(strings.TrimSpace(res[idx+1:])); err == nil && h > 0 {
+				v.Height = h
+			}
+		}
+	}
+	return v
+}
+
+// bestVariant 返回分辨率最高（无分辨率时按码率最高）的子流。
+// 用于「优先下载分辨率最高的那个」：Master 播放列表自动选择最佳清晰度。
+func bestVariant(vs []Variant) Variant {
+	best := vs[0]
+	for _, v := range vs[1:] {
+		if betterVariant(v, best) {
+			best = v
+		}
+	}
+	return best
+}
+
+// betterVariant 判断 a 是否比 b 更优：先比分辨率宽，再比码率；都不相同时保持前者。
+func betterVariant(a, b Variant) bool {
+	if a.Width != b.Width {
+		return a.Width > b.Width
+	}
+	return a.Bandwidth > b.Bandwidth
 }
 
 // ResolveURL 将相对地址解析为绝对地址。

@@ -6,6 +6,14 @@ export function AddDownload(arg1, arg2, arg3) {
   return window['go']['main']['App']['AddDownload'](arg1, arg2, arg3);
 }
 
+export function BatchCancel(arg1) {
+  return window['go']['main']['App']['BatchCancel'](arg1);
+}
+
+export function BatchRemove(arg1, arg2) {
+  return window['go']['main']['App']['BatchRemove'](arg1, arg2);
+}
+
 export function CancelTask(arg1) {
   return window['go']['main']['App']['CancelTask'](arg1);
 }
@@ -14,12 +22,20 @@ export function ChooseFolder() {
   return window['go']['main']['App']['ChooseFolder']();
 }
 
+export function CopyText(arg1) {
+  return window['go']['main']['App']['CopyText'](arg1);
+}
+
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
 export function GetTasks() {
   return window['go']['main']['App']['GetTasks']();
+}
+
+export function OpenFolder(arg1) {
+  return window['go']['main']['App']['OpenFolder'](arg1);
 }
 
 export function PauseTask(arg1) {
@@ -40,4 +56,8 @@ export function RetryTask(arg1) {
 
 export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
+}
+
+export function Shutdown() {
+  return window['go']['main']['App']['Shutdown']();
 }
