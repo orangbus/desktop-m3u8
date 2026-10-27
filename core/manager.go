@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ type Manager struct {
 	tasks      map[string]*Task
 	settings   Settings
 	running    int          // 当前正在下载的任务数
+	seqCtr     uint64       // 任务加入顺序计数器（调度 FIFO 用）
 	emit       func(*Task)  // 进度通知回调（推送到前端）
 	quit       chan struct{}
 	prevBytes  map[string]int64 // 速度计算用：上次总字节
@@ -72,6 +74,7 @@ func (m *Manager) AddTask(urlStr, filename string, headers map[string]string) *T
 	if strings.TrimSpace(filename) == "" {
 		filename = time.Now().Format("20060102-150405")
 	}
+	m.seqCtr++
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &Task{
 		ID:        id,
@@ -86,6 +89,7 @@ func (m *Manager) AddTask(urlStr, filename string, headers map[string]string) *T
 		conc:      m.settings.ConcurrencyPerTask,
 		ctx:       ctx,
 		cancel:    cancel,
+		seq:       m.seqCtr,
 	}
 	m.tasks[id] = t
 	m.cond.Broadcast()
@@ -98,14 +102,17 @@ func (m *Manager) AddTask(urlStr, filename string, headers map[string]string) *T
 }
 
 // schedule 后台调度：持续把等待中的任务推入下载（受并发上限约束）。
+// 按 seq（加入顺序）FIFO 取任务，而不是依赖 map 遍历的随机顺序。
 func (m *Manager) schedule() {
 	for {
 		m.mu.Lock()
 		var next *Task
 		for _, t := range m.tasks {
-			if t.Status == StatusWaiting {
+			if t.Status != StatusWaiting {
+				continue
+			}
+			if next == nil || t.seq < next.seq {
 				next = t
-				break
 			}
 		}
 		if next == nil {
@@ -154,21 +161,40 @@ func (m *Manager) runTask(t *Task) {
 
 	out, err := downloadTask(t, onProgress)
 	m.mu.Lock()
+	// 任务可能在此期间被 RemoveTask/BatchRemove 删除：已删除的任务不再更新/推送，
+	// 避免迟到的 emit 把已删任务重新顶回前端列表。
+	_, alive := m.tasks[t.ID]
 	if err != nil {
-		if err == context.Canceled {
-			// 被暂停或取消：保持当前状态（paused/cancelled），不覆盖
-		} else {
+		// 被暂停或取消：保持当前状态（paused/cancelled），不覆盖。
+		// 错误可能被 http 层包装（*url.Error），必须用 errors.Is 判断；
+		// 另外 ctx 已取消时（如批量取消删除了分片导致的写失败），一律视为主动取消。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || t.ctx.Err() != nil {
+			// 保持现状
+		} else if alive {
 			t.Status = StatusFailed
 			t.Error = err.Error()
 		}
-	} else {
+	} else if alive {
 		t.Status = StatusDone
 		t.OutputPath = out
 		t.setSpeed(0)
 		delete(m.prevBytes, t.ID)
 	}
+	snap := snapshotTask(t)
 	m.mu.Unlock()
-	m.notify(t)
+	if alive {
+		m.notifySnapshot(snap)
+	}
+}
+
+// snapshotTask 生成任务快照（原子字段安全读取），供跨协程 emit 使用，
+// 避免直接序列化正在被并发写入的 Task 指针造成数据竞争。
+func snapshotTask(t *Task) *Task {
+	c := *t
+	c.Speed = atomic.LoadInt64(&t.Speed)
+	c.TotalBytes = atomic.LoadInt64(&t.TotalBytes)
+	c.DoneSegs = atomic.LoadInt64(&t.DoneSegs)
+	return &c
 }
 
 // PauseTask 暂停任务（保留已下载分片，可继续）。
@@ -180,7 +206,7 @@ func (m *Manager) PauseTask(id string) {
 		return
 	}
 	changed := false
-	if t.Status == StatusDownload || t.Status == StatusParsing || t.Status == StatusWaiting {
+	if t.Status == StatusDownload || t.Status == StatusParsing || t.Status == StatusWaiting || t.Status == StatusMerging {
 		t.cancel()
 		t.Status = StatusPaused
 		t.setSpeed(0)
@@ -205,6 +231,8 @@ func (m *Manager) ResumeTask(id string) {
 		t.ctx, t.cancel = context.WithCancel(context.Background())
 		t.Status = StatusWaiting
 		t.Error = ""
+		// 回填已下载字节（与重试一致），保证续传后进度条与"已下载大小"准确
+		atomic.StoreInt64(&t.TotalBytes, existingBytes(t.dir))
 		m.cond.Broadcast()
 		m.mu.Unlock()
 		m.notify(t)
@@ -214,7 +242,7 @@ func (m *Manager) ResumeTask(id string) {
 	m.mu.Unlock()
 }
 
-// CancelTask 取消任务（清理临时分片，标记为已取消）。
+// CancelTask 取消任务（保留临时分片供「重试」断点续传；批量取消 BatchCancel 才会删分片）。
 func (m *Manager) CancelTask(id string) {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
@@ -273,7 +301,7 @@ func (m *Manager) ShutdownAll() {
 	m.mu.Lock()
 	for _, t := range m.tasks {
 		switch t.Status {
-		case StatusWaiting, StatusParsing, StatusDownload:
+		case StatusWaiting, StatusParsing, StatusDownload, StatusMerging:
 			t.cancel()
 			t.Status = StatusCancelled
 			t.Error = ""
@@ -296,7 +324,7 @@ func (m *Manager) BatchCancel(ids []string) {
 			continue
 		}
 		switch t.Status {
-		case StatusWaiting, StatusParsing, StatusDownload:
+		case StatusWaiting, StatusParsing, StatusDownload, StatusMerging:
 			t.cancel()
 			_ = os.RemoveAll(t.dir) // 删除临时分片
 			t.Status = StatusCancelled
@@ -381,11 +409,7 @@ func (m *Manager) Tasks() []*Task {
 	defer m.mu.Unlock()
 	list := make([]*Task, 0, len(m.tasks))
 	for _, t := range m.tasks {
-		c := *t
-		c.Speed = atomic.LoadInt64(&t.Speed)
-		c.TotalBytes = atomic.LoadInt64(&t.TotalBytes)
-		c.DoneSegs = atomic.LoadInt64(&t.DoneSegs)
-		list = append(list, &c)
+		list = append(list, snapshotTask(t))
 	}
 	return list
 }
@@ -404,11 +428,7 @@ func (m *Manager) SpeedLoop(interval time.Duration) {
 				if t.Status != StatusDownload {
 					continue
 				}
-				c := *t
-				c.Speed = atomic.LoadInt64(&t.Speed)
-				c.TotalBytes = atomic.LoadInt64(&t.TotalBytes)
-				c.DoneSegs = atomic.LoadInt64(&t.DoneSegs)
-				tasks = append(tasks, &c)
+				tasks = append(tasks, snapshotTask(t))
 			}
 			// 在锁内直接 emit：保证推送状态与锁内检查一致，与「下载完成/失败」的终态事件
 			// 串行化——否则旧的 downloading 快照可能在 done/failed 事件之后才到达前端，
@@ -516,13 +536,27 @@ func (m *Manager) writeRecords(recs []taskRecord) {
 }
 
 // notify 推送状态变更到前端并持久化任务列表。
-// 下载进行中的高频进度更新做节流（每 2 秒一次），终态/等待等立即保存。
+// 先在锁内做快照，避免序列化正在被并发写入的 Task。
+// 已删除的任务直接忽略，防止迟到的推送把任务顶回前端。
 func (m *Manager) notify(t *Task) {
-	if m.emit != nil {
-		m.emit(t)
-	}
-	progressOnly := t.Status == StatusDownload
 	m.mu.Lock()
+	snap := snapshotTask(t)
+	m.mu.Unlock()
+	m.notifySnapshot(snap)
+}
+
+// notifySnapshot 推送任务快照；下载进行中的高频进度更新做节流（每 2 秒落盘一次），
+// 终态/等待等状态立即保存。任务已从 map 删除（被移除）时不落盘不推送。
+func (m *Manager) notifySnapshot(snap *Task) {
+	if m.emit != nil {
+		m.emit(snap)
+	}
+	progressOnly := snap.Status == StatusDownload
+	m.mu.Lock()
+	if _, ok := m.tasks[snap.ID]; !ok {
+		m.mu.Unlock()
+		return
+	}
 	if progressOnly {
 		if time.Since(m.lastSave) < 2*time.Second {
 			m.mu.Unlock()
@@ -568,7 +602,7 @@ func (m *Manager) load() {
 		}
 		status := r.Status
 		switch status {
-		case StatusWaiting, StatusParsing, StatusDownload:
+		case StatusWaiting, StatusParsing, StatusDownload, StatusMerging:
 			status = StatusFailed
 			if r.Error == "" {
 				r.Error = "上次会话中断，可重试续传"

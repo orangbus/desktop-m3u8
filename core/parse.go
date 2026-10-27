@@ -1,6 +1,8 @@
 package core
 
 import (
+	"crypto/aes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/url"
@@ -23,6 +25,7 @@ type Segment struct {
 	URI      string  // 分片地址（可能是相对路径）
 	KeyIndex int     // 对应的加密 Key 索引，-1 表示无加密
 	Duration float64 // 分片时长
+	Seq      int64   // 媒体序列号（MEDIA-SEQUENCE 起算，用于无 IV 时的解密）
 }
 
 // Key AES 加密密钥信息
@@ -56,6 +59,7 @@ func ParseM3U8(text string) (*Playlist, error) {
 	var seg *Segment
 	keyIndex := -1
 	extInf := false
+	mediaSeq := int64(0) // EXT-X-MEDIA-SEQUENCE，缺省 0（HLS 规范）
 
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -68,10 +72,17 @@ func ParseM3U8(text string) (*Playlist, error) {
 		case strings.HasPrefix(line, "#EXT-X-STREAM-INF"):
 			// Master playlist：本版本取第一个子流，由调用方处理
 			return nil, errMasterPlaylist
+		case strings.HasPrefix(line, "#EXT-X-MEDIA-SEQUENCE:"):
+			if n, err := strconv.ParseInt(strings.TrimSpace(line[len("#EXT-X-MEDIA-SEQUENCE:"):]), 10, 64); err == nil && n >= 0 {
+				mediaSeq = n
+			}
 		case strings.HasPrefix(line, "#EXT-X-KEY"):
 			params := parseLineParams(line)
 			method := CryptMethod(params["METHOD"])
 			if method == CryptMethodNONE {
+				// HLS 规范：METHOD=NONE 之后的所有分片都不加密，
+				// 必须重置 keyIndex，否则后续分片会错误地沿用上一个 key 解密。
+				keyIndex = -1
 				continue
 			}
 			keyIndex++
@@ -79,7 +90,7 @@ func ParseM3U8(text string) (*Playlist, error) {
 			pl.Keys[keyIndex] = k
 		case strings.HasPrefix(line, "#EXTINF:"):
 			extInf = true
-			seg = &Segment{KeyIndex: keyIndex}
+			seg = &Segment{KeyIndex: keyIndex, Seq: mediaSeq + int64(len(pl.Segments))}
 		case strings.HasPrefix(line, "#EXT-X-ENDLIST"):
 			pl.EndList = true
 		case strings.HasPrefix(line, "#"):
@@ -214,12 +225,23 @@ func parseLineParams(line string) map[string]string {
 	return params
 }
 
-func parseIV(iv string) ([]byte, error) {
-	if iv == "" {
-		return nil, nil
+// keyIVBytes 返回分片解密用的 IV：
+// - 显式 IV（十六进制）：直接解析；
+// - 未显式指定：按 HLS 规范使用该分片的媒体序列号（64 位大端，左补零到 16 字节）。
+func keyIVBytes(ivHex string, seq int64) ([]byte, error) {
+	if ivHex == "" {
+		iv := make([]byte, aes.BlockSize)
+		binary.BigEndian.PutUint64(iv[8:], uint64(seq))
+		return iv, nil
 	}
-	s := strings.TrimPrefix(iv, "0x")
-	return hexToBytes(s)
+	b, err := hexToBytes(strings.TrimPrefix(ivHex, "0x"))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != aes.BlockSize {
+		return nil, fmt.Errorf("invalid IV length %d", len(b))
+	}
+	return b, nil
 }
 
 func hexToBytes(s string) ([]byte, error) {

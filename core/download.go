@@ -23,7 +23,7 @@ const aesKeyLen = 16
 // parseAndFetch 解析 m3u8 并下载 AES key。headers 为请求头。
 func parseAndFetch(ctx context.Context, m3u8URL string, headers map[string]string) (*ParseResult, error) {
 	client := NewHTTPClient(headers)
-	body, err := client.Get(m3u8URL)
+	body, err := client.Get(ctx, m3u8URL)
 	if err != nil {
 		return nil, fmt.Errorf("获取 m3u8 失败: %w", err)
 	}
@@ -53,7 +53,7 @@ func parseAndFetch(ctx context.Context, m3u8URL string, headers map[string]strin
 			continue
 		}
 		keyURL := ResolveURL(base, key.URI)
-		kb, err := client.GetBytes(keyURL)
+		kb, err := client.GetBytes(ctx, keyURL)
 		if err != nil {
 			return nil, fmt.Errorf("获取解密 key 失败(%s): %w", keyURL, err)
 		}
@@ -100,7 +100,13 @@ func downloadTask(t *Task, onProgress func()) (string, error) {
 		return "", err
 	}
 
-	out, err := t.merge(onProgress)
+	// 切换到合并阶段：状态置为 merging 并通知前端（进度条不再回跳）。
+	t.Status = StatusMerging
+	if onProgress != nil {
+		onProgress()
+	}
+
+	out, err := t.merge()
 	if err != nil {
 		return "", err
 	}
@@ -148,7 +154,7 @@ func (t *Task) downloadSegments(res *ParseResult, onProgress func()) error {
 			}
 			seg := res.Playlist.Segments[i]
 			segURL := ResolveURL(res.URL, seg.URI)
-			body, err := t.client.Get(segURL)
+			body, err := t.client.Get(t.ctx, segURL)
 			if err != nil {
 				e := fmt.Errorf("分片 %d 下载失败: %w", i, err)
 				firstErr.CompareAndSwap(nil, &e)
@@ -157,12 +163,19 @@ func (t *Task) downloadSegments(res *ParseResult, onProgress func()) error {
 			data, err := io.ReadAll(body)
 			body.Close()
 			if err != nil {
+				// 慢速网络下读体中断是常态，直接透传 ctx 取消
 				firstErr.CompareAndSwap(nil, &err)
 				return
 			}
 			if seg.KeyIndex >= 0 && t.keys != nil {
 				if keyBytes, ok := t.keys[seg.KeyIndex]; ok {
-					data, err = aesDecrypt(data, keyBytes, res.Playlist.Keys[seg.KeyIndex].IV)
+					iv, ivErr := keyIVBytes(res.Playlist.Keys[seg.KeyIndex].IV, seg.Seq)
+					if ivErr != nil {
+						e := fmt.Errorf("分片 %d IV 无效: %w", i, ivErr)
+						firstErr.CompareAndSwap(nil, &e)
+						return
+					}
+					data, err = aesDecrypt(data, keyBytes, iv)
 					if err != nil {
 						e := fmt.Errorf("分片 %d 解密失败: %w", i, err)
 						firstErr.CompareAndSwap(nil, &e)
@@ -205,7 +218,7 @@ func (t *Task) concurrency() int {
 }
 
 // merge 按序合并所有 ts 分片为一个视频文件，输出到最终目录。
-func (t *Task) merge(onProgress func()) (string, error) {
+func (t *Task) merge() (string, error) {
 	name := sanitizeFilename(t.Filename)
 	if name == "" {
 		name = "video"
@@ -214,7 +227,8 @@ func (t *Task) merge(onProgress func()) (string, error) {
 	if !strings.HasSuffix(lower, ".mp4") && !strings.HasSuffix(lower, ".ts") {
 		name += ".mp4"
 	}
-	out := filepath.Join(t.outDir, name)
+	// 同名任务防覆盖：已存在则追加序号 video(1).mp4
+	out := uniqueOutputPath(t.outDir, name)
 	f, err := os.Create(out)
 	if err != nil {
 		return "", err
@@ -229,18 +243,16 @@ func (t *Task) merge(onProgress func()) (string, error) {
 		default:
 		}
 		segPath := filepath.Join(t.dir, fmt.Sprintf("%d.ts", i))
+		// 分片缺失说明下载不完整，必须报错而不是静默产出残缺视频
 		data, err := os.ReadFile(segPath)
 		if err != nil {
-			continue
+			_ = os.Remove(out)
+			return "", fmt.Errorf("分片 %d 缺失，无法合并: %w", i, err)
 		}
 		if _, err := w.Write(data); err != nil {
 			// 合并中断：清理残留的半成品文件，避免删除任务时留下孤儿文件
 			_ = os.Remove(out)
 			return "", err
-		}
-		t.setDoneSegs(i + 1)
-		if onProgress != nil {
-			onProgress()
 		}
 	}
 	if err := w.Flush(); err != nil {
@@ -252,27 +264,50 @@ func (t *Task) merge(onProgress func()) (string, error) {
 	return out, nil
 }
 
-// sanitizeFilename 去除文件名中的非法字符（Windows 不允许 <>:"/\|?*）。
-func sanitizeFilename(name string) string {
-	name = strings.TrimSpace(filepath.Base(name))
-	replacer := strings.NewReplacer("<", "", ">", "", ":", "", "\"", "", "/", "", "\\", "", "|", "", "?", "", "*", "")
-	return replacer.Replace(name)
+// uniqueOutputPath 在 dir 下返回不冲突的输出路径；name 已存在时追加 (1)、(2)…
+func uniqueOutputPath(dir, name string) string {
+	p := filepath.Join(dir, name)
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		return p
+	}
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	for i := 1; ; i++ {
+		p = filepath.Join(dir, fmt.Sprintf("%s(%d)%s", base, i, ext))
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			return p
+		}
+	}
 }
 
-// aesDecrypt AES-128-CBC 解密。key 为 16 字节，iv 为十六进制字符串。
-func aesDecrypt(data, key []byte, ivHex string) ([]byte, error) {
+// sanitizeFilename 去除文件名中的非法字符（Windows 不允许 <>:"/\|?*），
+// 并处理 Windows 保留设备名（CON、PRN、COM1…）。
+func sanitizeFilename(name string) string {
+	name = strings.TrimSpace(filepath.Base(name))
+	replacer := strings.NewReplacer("<", "", ">", "", ":", "", "\"", "", "/", "", "\\", "", "|", "", "?", "", "*", "", "\x00", "")
+	name = replacer.Replace(name)
+	// Windows 保留名（含带扩展名的情况，如 CON.mp4）：加前缀避开
+	stem := strings.ToUpper(strings.TrimSuffix(name, filepath.Ext(name)))
+	if winReservedNames[stem] {
+		name = "_" + name
+	}
+	return name
+}
+
+// winReservedNames Windows 保留设备名（不区分大小写）。
+var winReservedNames = map[string]bool{
+	"CON": true, "PRN": true, "AUX": true, "NUL": true,
+	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
+	"COM6": true, "COM7": true, "COM8": true, "COM9": true,
+	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true,
+	"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+}
+
+// aesDecrypt AES-128-CBC 解密。key 为 16 字节，iv 为 16 字节 IV。
+func aesDecrypt(data, key []byte, iv []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
-	}
-	var iv []byte
-	if ivHex != "" {
-		iv, err = hexToBytes(strings.TrimPrefix(ivHex, "0x"))
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		iv = bytes.Repeat([]byte{0}, aes.BlockSize)
 	}
 	if len(iv) != aes.BlockSize {
 		return nil, errors.New("invalid IV length")

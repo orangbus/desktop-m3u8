@@ -25,7 +25,7 @@ const selectedIds = ref(new Set())
 const batchState = ref({ show: false, ids: [], title: '', message: '', fileOption: false, fileOptionLabel: '' })
 const selectedCount = computed(() => selectedIds.value.size)
 const allSelected = computed(
-  () => sortedTasks.value.length > 0 && selectedCount === sortedTasks.value.length
+  () => sortedTasks.value.length > 0 && selectedCount.value === sortedTasks.value.length
 )
 function toggleAll() {
   if (allSelected.value) selectedIds.value = new Set()
@@ -94,7 +94,7 @@ const filteredTasks = computed(() => {
   switch (filter.value) {
     case 'downloading':
       list = tasks.value.filter((t) =>
-        ['waiting', 'parsing', 'downloading', 'paused'].includes(t.status)
+        ['waiting', 'parsing', 'downloading', 'merging', 'paused'].includes(t.status)
       )
       break
     case 'done':
@@ -120,7 +120,7 @@ const filteredTasks = computed(() => {
 
 // 排序：下载中（含等待/解析/暂停）按添加时间正序（最早添加在最前）；
 // 已完成/失败/已取消按添加时间倒序（最新在最前）。
-const runningKeys = new Set(['waiting', 'parsing', 'downloading', 'paused'])
+const runningKeys = new Set(['waiting', 'parsing', 'downloading', 'merging', 'paused'])
 const sortedTasks = computed(() => {
   const list = filteredTasks.value.slice()
   list.sort((a, b) => {
@@ -148,6 +148,7 @@ const statusMeta = {
   waiting: { label: '等待中', cls: 'wait' },
   parsing: { label: '解析中', cls: 'download' },
   downloading: { label: '下载中', cls: 'download' },
+  merging: { label: '合并中', cls: 'download' },
   paused: { label: '已暂停', cls: 'wait' },
   done: { label: '已完成', cls: 'done' },
   failed: { label: '失败', cls: 'failed' },
@@ -193,7 +194,7 @@ function progressOf(t) {
 }
 
 function isRunning(t) {
-  return ['waiting', 'parsing', 'downloading'].includes(t.status)
+  return ['waiting', 'parsing', 'downloading', 'merging'].includes(t.status)
 }
 
 function pause(id) {
@@ -247,8 +248,13 @@ async function confirmBatch(opt) {
   const ids = s.ids
   if (!ids.length) return
   try {
-    if (filter.value === 'downloading') await BatchCancel(ids)
-    else await BatchRemove(ids, !!(opt && opt.deleteFiles))
+    if (filter.value === 'downloading') {
+      await BatchCancel(ids)
+    } else {
+      // 先记录到 removedIds，防止后端迟到的 task:update 把已删任务重新加回列表
+      ids.forEach((id) => removedIds.add(id))
+      await BatchRemove(ids, !!(opt && opt.deleteFiles))
+    }
   } catch (e) {
     /* 静默 */
   }

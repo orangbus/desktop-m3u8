@@ -37,7 +37,11 @@ async function save() {
   error.value = ''
   saving.value = true
   try {
+    // 以当前完整设置为基底合并，避免遗漏 apiBaseUrl/apiKey 等本弹窗不编辑的
+    // 字段被后端整体覆盖写入，导致接口地址/授权密钥被清空
+    const cur = await GetSettings()
     await SaveSettings({
+      ...cur,
       maxConcurrentTasks: form.maxConcurrentTasks,
       concurrencyPerTask: form.concurrencyPerTask,
       savePath: form.savePath,

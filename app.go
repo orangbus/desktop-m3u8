@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os/exec"
 	goruntime "runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,7 +95,10 @@ func (a *App) startHTTPAPI(port int) {
 	}
 	a.httpSrv = srv
 	go func() {
-		_ = srv.ListenAndServe()
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// 端口被占用等启动失败不能静默：打日志便于排查
+			fmt.Printf("[api] 本地接口启动失败(端口 %d): %v\n", port, err)
+		}
 	}()
 }
 
@@ -111,7 +116,12 @@ func cors(h http.Handler) http.Handler {
 	})
 }
 
+// maxAPIBody 本地接口请求体大小上限（1MB，足够上千条批量推送）。
+const maxAPIBody = 1 << 20
+
 // handleDownload 处理 /api/download 请求，把任务加入下载队列。
+// 若设置中配置了授权密钥（apiKey），请求必须携带 X-Api-Key 头或
+// Authorization: Bearer <key>，防止任意网页向本机推送任务。
 func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if r.Method != http.MethodPost {
@@ -122,6 +132,18 @@ func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"code":1,"message":"manager not ready"}`, http.StatusServiceUnavailable)
 		return
 	}
+	// 授权密钥校验（未配置则不校验，保持开箱即用）
+	if key := trim(a.manager.Settings().ApiKey); key != "" {
+		got := r.Header.Get("X-Api-Key")
+		if got == "" {
+			got = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		if got != key {
+			http.Error(w, `{"code":1,"message":"unauthorized: missing or invalid api key"}`, http.StatusUnauthorized)
+			return
+		}
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, `{"code":1,"message":"read body failed"}`, http.StatusBadRequest)

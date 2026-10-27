@@ -13,6 +13,7 @@ const (
 	StatusWaiting   TaskStatus = "waiting"     // 等待调度
 	StatusParsing   TaskStatus = "parsing"     // 解析中
 	StatusDownload  TaskStatus = "downloading" // 下载中
+	StatusMerging   TaskStatus = "merging"     // 合并中（分片已全部下完）
 	StatusPaused    TaskStatus = "paused"      // 已暂停
 	StatusDone      TaskStatus = "done"        // 已完成
 	StatusFailed    TaskStatus = "failed"      // 失败
@@ -44,7 +45,8 @@ type Task struct {
 	dir      string // 临时分片目录
 	outDir   string // 最终输出目录
 	client   *HTTPClient
-	conc     int // 单任务分片并发数（由 manager 注入）
+	conc     int    // 单任务分片并发数（由 manager 注入）
+	seq      uint64 // 加入顺序（调度 FIFO 用）
 }
 
 // addBytes 原子累加已下载字节。
