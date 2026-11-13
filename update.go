@@ -31,7 +31,7 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	appVersion    = "1.0.2"
+	appVersion    = "1.0.3"
 	updateRepoAPI = "https://api.github.com/repos/orangbus/desktop-m3u8/releases/latest"
 	updateRepoURL = "https://github.com/orangbus/desktop-m3u8/releases/latest"
 )
