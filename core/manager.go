@@ -422,10 +422,17 @@ func (m *Manager) SpeedLoop(interval time.Duration) {
 		select {
 		case <-ticker.C:
 			m.updateSpeeds(interval)
+			// 每秒推送全部「进行中」（等待/解析/下载/合并）任务：
+			// 1) 下载中任务刷新速度/进度；
+			// 2) 兜底保证等待/解析中的任务（如浏览器接口推送新增的）即使
+			//    单次 task:update 事件丢失，也会在 1 秒内出现在前端列表。
 			m.mu.Lock()
+			active := map[TaskStatus]bool{
+				StatusWaiting: true, StatusParsing: true, StatusDownload: true, StatusMerging: true,
+			}
 			tasks := make([]*Task, 0, len(m.tasks))
 			for _, t := range m.tasks {
-				if t.Status != StatusDownload {
+				if !active[t.Status] {
 					continue
 				}
 				tasks = append(tasks, snapshotTask(t))

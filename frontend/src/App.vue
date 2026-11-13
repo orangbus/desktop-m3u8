@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, reactive, nextTick, onMounted, onUpdated, onUnmounted } from 'vue'
+import { ref, computed, reactive, watch, nextTick, onMounted, onUpdated, onUnmounted } from 'vue'
 import { GetTasks, GetSettings, Shutdown, BatchCancel, BatchRemove, PauseTask, ResumeTask, CancelTask, RemoveTask, RetryTask, CopyText, OpenFolder } from '../wailsjs/go/main/App'
 import { EventsOn, WindowMinimise, WindowToggleMaximise, Quit } from '../wailsjs/runtime/runtime'
 import NewDownloadForm from './components/NewDownloadForm.vue'
@@ -382,9 +382,25 @@ function onAdded() {
   currentNav.value = 'download'
 }
 
+// 切换到「下载管理」时：
+// 1) 重置虚拟滚动状态——任务区 DOM 因 v-if 被销毁重建，实际 scrollTop=0，
+//    refs 若残留旧值会导致渲染区间错位（表现为部分任务卡片“消失”）；
+// 2) 与后端对账一次（GetTasks），防止 task:update 事件丢失造成列表不同步。
+watch(currentNav, async (nav) => {
+  if (nav !== 'download') return
+  scrollTop.value = 0
+  await nextTick()
+  if (listWrap.value) {
+    viewportH.value = listWrap.value.clientHeight
+  }
+  measure()
+  loadTasks()
+})
+
 onMounted(async () => {
-  await loadTasks()
+  // 先订阅事件再拉初始列表，避免拉取期间到达的事件丢失
   unsubscribe = EventsOn('task:update', (t) => upsertTask(t))
+  await loadTasks()
   setupViewport()
   measure()
 })
