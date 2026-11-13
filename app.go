@@ -53,6 +53,14 @@ func (a *App) startup(ctx context.Context) {
 	a.manager = core.NewManager(settings, a.emitTask)
 	go a.manager.SpeedLoop(1 * time.Second)
 	a.startHTTPAPI(apiPortOf(settings))
+	// 清理上次在线更新遗留的旧程序备份，并异步检查新版本
+	cleanupOldBinary()
+	go func() {
+		time.Sleep(1200 * time.Millisecond) // 等窗口与前端就绪后再推送事件
+		if info := a.checkUpdate(); info != nil && info.HasUpdate {
+			runtime.EventsEmit(ctx, "update:available", info)
+		}
+	}()
 }
 
 // emitTask 推送任务状态变更到前端。

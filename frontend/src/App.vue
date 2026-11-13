@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, reactive, watch, nextTick, onMounted, onUpdated, onUnmounted } from 'vue'
-import { GetTasks, GetSettings, Shutdown, BatchCancel, BatchRemove, PauseTask, ResumeTask, CancelTask, RemoveTask, RetryTask, CopyText, OpenFolder } from '../wailsjs/go/main/App'
+import { GetTasks, GetSettings, Shutdown, BatchCancel, BatchRemove, PauseTask, ResumeTask, CancelTask, RemoveTask, RetryTask, CopyText, OpenFolder, CheckUpdate, DownloadUpdate, RestartApp, OpenReleasePage } from '../wailsjs/go/main/App'
 import { EventsOn, WindowMinimise, WindowToggleMaximise, Quit } from '../wailsjs/runtime/runtime'
 import NewDownloadForm from './components/NewDownloadForm.vue'
 import VideoParser from './components/VideoParser.vue'
@@ -8,6 +8,7 @@ import SettingsModal from './components/SettingsModal.vue'
 import AccountModal from './components/AccountModal.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import HelpView from './components/HelpView.vue'
+import UpdateModal from './components/UpdateModal.vue'
 
 const tasks = ref([])
 const filter = ref('downloading')
@@ -20,6 +21,58 @@ const removedIds = new Set()
 
 const confirmState = ref({ show: false, id: null, title: '', message: '' })
 const closeConfirm = ref(false) // 关闭软件二次确认框
+
+// ---- 版本更新：启动检查 + 强制提示 + 在线更新 ----
+const updateInfo = ref(null) // 有新版本时的 UpdateInfo（非空即显示强制弹窗）
+const updatePhase = ref('ready') // ready | downloading | installed | saved | error
+const updateProgress = ref(0)
+const updateResult = ref(null)
+const updateError = ref('')
+const updateHandled = ref(false) // 用户已选择「前往 GitHub」处理后不再重复弹出
+
+function showUpdate(info) {
+  if (updateHandled.value || busyUpdating()) return
+  updateInfo.value = info
+  updatePhase.value = 'ready'
+  updateProgress.value = 0
+  updateResult.value = null
+  updateError.value = ''
+}
+function busyUpdating() {
+  return ['downloading', 'installed', 'saved'].includes(updatePhase.value)
+}
+// 启动兜底：事件推送之外再主动查一次（事件丢失时依然能弹出提示）
+async function doUpdateCheck() {
+  try {
+    const info = await CheckUpdate()
+    if (info && info.hasUpdate) showUpdate(info)
+  } catch (e) {
+    /* 网络失败静默 */
+  }
+}
+async function startUpdate() {
+  updatePhase.value = 'downloading'
+  updateProgress.value = 0
+  try {
+    const res = await DownloadUpdate()
+    updateResult.value = res
+    updatePhase.value = res && res.status === 'saved' ? 'saved' : 'installed'
+  } catch (e) {
+    updateError.value = typeof e === 'string' ? e : e?.message || String(e)
+    updatePhase.value = 'error'
+  }
+}
+function goGitHub() {
+  OpenReleasePage()
+  updateHandled.value = true
+  updateInfo.value = null
+}
+function restartApp() {
+  RestartApp()
+}
+function openSaved() {
+  if (updateResult.value?.path) OpenFolder(updateResult.value.path)
+}
 // 批量操作：选中任务 id 集合 + 批量操作确认框
 const selectedIds = ref(new Set())
 const batchState = ref({ show: false, ids: [], title: '', message: '', fileOption: false, fileOptionLabel: '' })
@@ -400,7 +453,13 @@ watch(currentNav, async (nav) => {
 onMounted(async () => {
   // 先订阅事件再拉初始列表，避免拉取期间到达的事件丢失
   unsubscribe = EventsOn('task:update', (t) => upsertTask(t))
+  const offProgress = EventsOn('update:progress', (p) => {
+    updatePhase.value = 'downloading'
+    updateProgress.value = Math.min(100, p?.percent || 0)
+  })
+  const offAvailable = EventsOn('update:available', (info) => showUpdate(info))
   await loadTasks()
+  doUpdateCheck() // 启动兜底检查（事件丢失时依然弹出）
   setupViewport()
   measure()
 })
@@ -665,6 +724,19 @@ onUnmounted(() => {
       :file-option-label="batchState.fileOptionLabel"
       @confirm="confirmBatch"
       @cancel="cancelBatch"
+    />
+    <!-- 版本更新强制提示（不可通过遮罩/关闭键跳过，需选择更新方式） -->
+    <UpdateModal
+      :show="!!updateInfo"
+      :info="updateInfo"
+      :phase="updatePhase"
+      :progress="updateProgress"
+      :result="updateResult"
+      :error="updateError"
+      @update="startUpdate"
+      @github="goGitHub"
+      @restart="restartApp"
+      @opensaved="openSaved"
     />
   </div>
 </template>

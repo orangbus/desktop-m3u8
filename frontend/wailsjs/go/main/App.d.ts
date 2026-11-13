@@ -14,6 +14,14 @@ export function ChooseFolder():Promise<string>;
 
 export function CopyText(arg1:string):Promise<void>;
 
+export function CheckUpdate():Promise<any>;
+
+export function DownloadUpdate():Promise<any>;
+
+export function OpenReleasePage():Promise<void>;
+
+export function RestartApp():Promise<void>;
+
 export function GetSettings():Promise<core.Settings>;
 
 export function GetTasks():Promise<Array<core.Task>>;

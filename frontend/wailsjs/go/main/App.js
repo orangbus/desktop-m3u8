@@ -14,6 +14,10 @@ export function BatchRemove(arg1, arg2) {
   return window['go']['main']['App']['BatchRemove'](arg1, arg2);
 }
 
+export function CheckUpdate() {
+  return window['go']['main']['App']['CheckUpdate']();
+}
+
 export function CancelTask(arg1) {
   return window['go']['main']['App']['CancelTask'](arg1);
 }
@@ -26,6 +30,10 @@ export function CopyText(arg1) {
   return window['go']['main']['App']['CopyText'](arg1);
 }
 
+export function DownloadUpdate() {
+  return window['go']['main']['App']['DownloadUpdate']();
+}
+
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
@@ -36,6 +44,14 @@ export function GetTasks() {
 
 export function OpenFolder(arg1) {
   return window['go']['main']['App']['OpenFolder'](arg1);
+}
+
+export function OpenReleasePage() {
+  return window['go']['main']['App']['OpenReleasePage']();
+}
+
+export function RestartApp() {
+  return window['go']['main']['App']['RestartApp']();
 }
 
 export function PauseTask(arg1) {
