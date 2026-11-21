@@ -14,12 +14,12 @@ export function BatchRemove(arg1, arg2) {
   return window['go']['main']['App']['BatchRemove'](arg1, arg2);
 }
 
-export function CheckUpdate() {
-  return window['go']['main']['App']['CheckUpdate']();
-}
-
 export function CancelTask(arg1) {
   return window['go']['main']['App']['CancelTask'](arg1);
+}
+
+export function CheckUpdate() {
+  return window['go']['main']['App']['CheckUpdate']();
 }
 
 export function ChooseFolder() {
@@ -42,6 +42,10 @@ export function GetTasks() {
   return window['go']['main']['App']['GetTasks']();
 }
 
+export function GetVersion() {
+  return window['go']['main']['App']['GetVersion']();
+}
+
 export function OpenFolder(arg1) {
   return window['go']['main']['App']['OpenFolder'](arg1);
 }
@@ -50,16 +54,16 @@ export function OpenReleasePage() {
   return window['go']['main']['App']['OpenReleasePage']();
 }
 
-export function RestartApp() {
-  return window['go']['main']['App']['RestartApp']();
-}
-
 export function PauseTask(arg1) {
   return window['go']['main']['App']['PauseTask'](arg1);
 }
 
 export function RemoveTask(arg1) {
   return window['go']['main']['App']['RemoveTask'](arg1);
+}
+
+export function RestartApp() {
+  return window['go']['main']['App']['RestartApp']();
 }
 
 export function ResumeTask(arg1) {

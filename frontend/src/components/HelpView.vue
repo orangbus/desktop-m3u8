@@ -80,16 +80,23 @@ onMounted(async () => {
           应用内置本地 HTTP 服务，可从浏览器或其他程序直接推送下载任务，支持单个与批量。
           监听端口默认 <code>52323</code>，可在「设置 → API 下载端口」中自定义，保存后立即生效。
         </p>
-        <p class="hl-code">POST http://127.0.0.1:{{ apiPort }}/api/download</p>
-        <p class="hl-text">请求头 <code>Content-Type: application/json</code>（已开启跨域，浏览器可直接调用）。</p>
-        <p class="hl-text"><b>单个推送：</b></p>
+        <p class="hl-text"><b>方式一 · 链接推送（推荐，浏览器零限制）：</b>直接把下面的地址粘贴到地址栏或做成书签，参数需 URL 编码：</p>
+        <pre class="hl-pre">http://127.0.0.1:{{ apiPort }}/api/download?url=M3U8地址&amp;name=文件名</pre>
+        <p class="hl-text">
+          页面里可用 <code>window.open(url)</code> / <code>location.href=url</code> 跳转提交（主框架导航不受浏览器本地网络访问限制）。
+          <code>url</code> 必填、<code>name</code> 可省；多个任务重复写 <code>url=...&amp;url=...</code>。
+        </p>
+        <p class="hl-text"><b>方式二 · 表单推送：</b><code>POST</code> 到 <code>http://127.0.0.1:{{ apiPort }}/api/download</code>，字段 <code>url</code> / <code>name</code>（<code>url</code> 可重复）。</p>
+        <p class="hl-text"><b>方式三 · JSON 推送（程序化调用）：</b><code>POST</code> + <code>Content-Type: application/json</code>：</p>
         <pre class="hl-pre">{ "name": "文件名", "url": "https://example.com/index.m3u8" }</pre>
-        <p class="hl-text"><b>批量推送：</b></p>
-        <pre class="hl-pre">[
-  { "name": "文件1", "url": "https://example.com/a/index.m3u8" },
-  { "name": "文件2", "url": "https://example.com/b/index.m3u8" }
-]</pre>
-        <p class="hl-text">响应：<code>{ "code": 0, "message": "ok", "count": n, "rejected": n }</code>。文件名可留空，留空使用时间戳命名。</p>
+        <pre class="hl-pre">[ { "name": "文件1", "url": "https://a.m3u8" }, { "name": "文件2", "url": "https://b.m3u8" } ]</pre>
+        <p class="hl-text">JSON 响应：<code>{ "code": 0, "message": "ok", "count": n, "rejected": n }</code>；链接/表单提交返回「已提交」提示页。文件名留空则用时间戳命名。</p>
+        <p class="hl-note">
+          <b>为什么控制台 fetch 会失败？</b> 新版 Chrome / Edge 的「本地网络访问（LNA）」策略会拦截网页用
+          <code>fetch</code> / <code>XHR</code> 访问 <code>127.0.0.1</code>，尤其当页面本身是 <code>http</code> 时无法授权——
+          这看起来像 CORS 报错，但服务端无法绕过。请改用上面的<b>链接</b>或<b>表单</b>方式（属于页面导航，不受该限制）。
+          若配置了授权密钥，链接/表单可加 <code>key=密钥</code> 参数，fetch 则带 <code>X-Api-Key</code> 请求头。
+        </p>
       </section>
 
       <!-- 设置 -->
@@ -232,6 +239,16 @@ onMounted(async () => {
   padding: 7px 12px;
   margin: 8px 0;
   display: inline-block;
+}
+.hl-note {
+  font-size: 12.5px;
+  color: var(--text-sub);
+  line-height: 1.7;
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 9px 13px;
+  margin-top: 10px;
 }
 .hl-pre {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;

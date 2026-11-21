@@ -113,9 +113,19 @@ func (a *App) startHTTPAPI(port int) {
 // cors 允许浏览器跨域访问本地接口。
 func cors(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// 浏览器私有网络访问（PNA/LNA）对 loopback 请求要求精确匹配 Origin；
+		// 有 Origin 时原样反射（等价于原先的 *，不降低安全性），无 Origin（curl 等）时回退 *。
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, Authorization")
+		// 关键：Chrome/Edge 把「公网页面 → 127.0.0.1」视为跨地址空间请求，
+		// 预检响应必须带此头，否则报 "No 'Access-Control-Allow-Private-Network' header"。
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -128,15 +138,21 @@ func cors(h http.Handler) http.Handler {
 const maxAPIBody = 1 << 20
 
 // handleDownload 处理 /api/download 请求，把任务加入下载队列。
-// 若设置中配置了授权密钥（apiKey），请求必须携带 X-Api-Key 头或
-// Authorization: Bearer <key>，防止任意网页向本机推送任务。
+// 支持三种提交方式：
+//   - POST JSON：{name,url} 或 [{name,url},...]（程序化调用，需处理 CORS/LNA）
+//   - POST 表单：url=...&name=...（导航提交，不受 LNA 限制）
+//   - GET 链接：?url=...&name=...（地址栏直接打开 / 书签，不受 LNA 限制，最省事）
+//
+// 若设置中配置了授权密钥（apiKey），GET/表单可通过 ?key= / 表单 key= 传入，
+// 或用 X-Api-Key 头 / Authorization: Bearer，未配置则不校验。
 func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		http.Error(w, `{"code":1,"message":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 	if a.manager == nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		http.Error(w, `{"code":1,"message":"manager not ready"}`, http.StatusServiceUnavailable)
 		return
 	}
@@ -146,27 +162,21 @@ func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 		if got == "" {
 			got = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		}
+		if got == "" {
+			got = r.URL.Query().Get("key") // GET 导航提交无法自定义头，用查询参数
+		}
 		if got != key {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			http.Error(w, `{"code":1,"message":"unauthorized: missing or invalid api key"}`, http.StatusUnauthorized)
 			return
 		}
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBody)
-	body, err := io.ReadAll(r.Body)
+	batch, err := parseAPIPayloads(r)
 	if err != nil {
-		http.Error(w, `{"code":1,"message":"read body failed"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		http.Error(w, `{"code":1,"message":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
-	}
-
-	// 先尝试批量（数组），失败则回退为单个对象
-	var batch []apiPayload
-	if err := json.Unmarshal(body, &batch); err != nil {
-		var one apiPayload
-		if err := json.Unmarshal(body, &one); err != nil {
-			http.Error(w, `{"code":1,"message":"invalid json, expect {name,url} or [{name,url},...]"}`, http.StatusBadRequest)
-			return
-		}
-		batch = []apiPayload{one}
 	}
 
 	count := 0
@@ -180,6 +190,24 @@ func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 		a.manager.AddTask(u, trim(p.Name), nil)
 		count++
 	}
+
+	// GET / 表单属于导航请求：返回结果页，可自动跳回来源页，避免浏览器停在裸 JSON 上。
+	if isNavSubmit(r) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		ref := r.URL.Query().Get("back")
+		if ref == "" {
+			ref = r.Header.Get("Referer")
+		}
+		fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>已提交</title>
+<style>body{font:14px/1.6 system-ui,sans-serif;text-align:center;padding:60px;color:#333}</style>
+<p>已提交 <b>%d</b> 个下载任务，可关闭本页。</p>`, count)
+		if ref != "" {
+			fmt.Fprintf(w, `<script>setTimeout(function(){location.href=%q},1200)</script>`, ref)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	resp := map[string]interface{}{
 		"code":     0,
 		"message":  "ok",
@@ -187,6 +215,85 @@ func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 		"rejected": rejected,
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// isNavSubmit 是否为导航式提交（GET 链接或 POST 表单）。
+// 这类请求走浏览器主框架导航，不受 Chrome/Edge 的 LNA 策略拦截。
+func isNavSubmit(r *http.Request) bool {
+	if r.Method == http.MethodGet {
+		return true
+	}
+	ct := r.Header.Get("Content-Type")
+	return strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
+		strings.HasPrefix(ct, "multipart/form-data")
+}
+
+// parseAPIPayloads 解析推送请求，支持三种格式：
+//  1. GET 查询参数：?url=<地址>&name=<名称>，url 可重复实现批量
+//  2. 表单：url=<地址>&name=<名称>，url 可重复（application/x-www-form-urlencoded / multipart/form-data）
+//  3. JSON：单个 {name,url} 或批量 [{name,url},...]（application/json）
+//
+// GET/表单方式的意义：新版 Chrome/Edge 的 LNA 策略会拦截「网页 → 127.0.0.1」的
+// fetch/XHR，但主框架导航（地址栏打开链接、表单跳转、window.location）不受该限制，
+// 因此可作为零配置、无密钥依赖的推送通道。
+func parseAPIPayloads(r *http.Request) ([]apiPayload, error) {
+	ct := r.Header.Get("Content-Type")
+
+	// GET：从查询参数读取，url 可重复，name 按位置对应
+	if r.Method == http.MethodGet {
+		q := r.URL.Query()
+		urls := q["url"]
+		if len(urls) == 0 {
+			return nil, errors.New("missing url field")
+		}
+		names := q["name"]
+		batch := make([]apiPayload, 0, len(urls))
+		for i, u := range urls {
+			p := apiPayload{URL: u}
+			if i < len(names) {
+				p.Name = names[i]
+			}
+			batch = append(batch, p)
+		}
+		return batch, nil
+	}
+
+	// 表单：url 可重复（批量），name 按位置一一对应，缺省留空
+	if strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
+		strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(maxAPIBody); err != nil && err != http.ErrNotMultipart {
+			return nil, errors.New("parse form failed")
+		}
+		urls := r.PostForm["url"]
+		if len(urls) == 0 {
+			return nil, errors.New("missing url field")
+		}
+		names := r.PostForm["name"]
+		batch := make([]apiPayload, 0, len(urls))
+		for i, u := range urls {
+			p := apiPayload{URL: u}
+			if i < len(names) {
+				p.Name = names[i]
+			}
+			batch = append(batch, p)
+		}
+		return batch, nil
+	}
+
+	// JSON：先尝试批量（数组），失败则回退为单个对象
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, errors.New("read body failed")
+	}
+	var batch []apiPayload
+	if err := json.Unmarshal(body, &batch); err != nil {
+		var one apiPayload
+		if err := json.Unmarshal(body, &one); err != nil {
+			return nil, errors.New("invalid json, expect {name,url} or [{name,url},...]")
+		}
+		batch = []apiPayload{one}
+	}
+	return batch, nil
 }
 
 func trim(s string) string {

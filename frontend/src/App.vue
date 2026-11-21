@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, reactive, watch, nextTick, onMounted, onUpdated, onUnmounted } from 'vue'
-import { GetTasks, GetSettings, Shutdown, BatchCancel, BatchRemove, PauseTask, ResumeTask, CancelTask, RemoveTask, RetryTask, CopyText, OpenFolder, CheckUpdate, DownloadUpdate, RestartApp, OpenReleasePage } from '../wailsjs/go/main/App'
+import { GetTasks, GetSettings, GetVersion, Shutdown, BatchCancel, BatchRemove, PauseTask, ResumeTask, CancelTask, RemoveTask, RetryTask, CopyText, OpenFolder, CheckUpdate, DownloadUpdate, RestartApp, OpenReleasePage } from '../wailsjs/go/main/App'
 import { EventsOn, WindowMinimise, WindowToggleMaximise, Quit } from '../wailsjs/runtime/runtime'
 import NewDownloadForm from './components/NewDownloadForm.vue'
 import VideoParser from './components/VideoParser.vue'
@@ -16,6 +16,7 @@ const keyword = ref('')
 const showSettings = ref(false)
 const showAccount = ref(false)
 const hasLoaded = ref(false)
+const maxTasks = ref(5) // 同时下载的任务数上限（取自设置，仅用于展示）
 
 const removedIds = new Set()
 
@@ -23,6 +24,7 @@ const confirmState = ref({ show: false, id: null, title: '', message: '' })
 const closeConfirm = ref(false) // 关闭软件二次确认框
 
 // ---- 版本更新：启动检查 + 强制提示 + 在线更新 ----
+const appVersion = ref('') // 当前软件版本号（左下角设置区展示）
 const updateInfo = ref(null) // 有新版本时的 UpdateInfo（非空即显示强制弹窗）
 const updatePhase = ref('ready') // ready | downloading | installed | saved | error
 const updateProgress = ref(0)
@@ -136,8 +138,11 @@ function cancelClose() {
   closeConfirm.value = false
 }
 
+// 只有真正在下载（解析/下载/合并）才算「下载中」，受并发上限约束，数量恒 ≤ maxTasks。
+// 等待中/已暂停单独归入「等待中」，避免排队任务也显示为下载中造成"超过上限"的错觉。
 const filters = [
   { key: 'downloading', label: '下载中' },
+  { key: 'waiting', label: '等待中' },
   { key: 'done', label: '已完成' },
   { key: 'failed', label: '失败' },
 ]
@@ -147,8 +152,11 @@ const filteredTasks = computed(() => {
   switch (filter.value) {
     case 'downloading':
       list = tasks.value.filter((t) =>
-        ['waiting', 'parsing', 'downloading', 'merging', 'paused'].includes(t.status)
+        ['parsing', 'downloading', 'merging'].includes(t.status)
       )
+      break
+    case 'waiting':
+      list = tasks.value.filter((t) => ['waiting', 'paused'].includes(t.status))
       break
     case 'done':
       list = tasks.value.filter((t) => t.status === 'done')
@@ -190,11 +198,14 @@ const stats = computed(() => {
   const total = tasks.value.length
   const done = tasks.value.filter((t) => t.status === 'done').length
   const failed = tasks.value.filter((t) => t.status === 'failed').length
+  // 正在下载 = 解析/下载/合并（真正占用并发名额），等待 = 排队/暂停
+  const active = tasks.value.filter((t) => ['parsing', 'downloading', 'merging'].includes(t.status)).length
+  const waiting = tasks.value.filter((t) => ['waiting', 'paused'].includes(t.status)).length
   let speed = 0
   for (const t of tasks.value) {
     if (t.status === 'downloading') speed += t.speed || 0
   }
-  return { total, done, failed, speed }
+  return { total, done, failed, active, waiting, speed }
 })
 
 const statusMeta = {
@@ -221,6 +232,13 @@ async function loadTasks() {
   const list = await GetTasks()
   tasks.value = list
   hasLoaded.value = true
+  // 同步并发上限用于统计栏展示（下载中数量恒不超过它）
+  try {
+    const s = await GetSettings()
+    if (s && s.maxConcurrentTasks > 0) maxTasks.value = s.maxConcurrentTasks
+  } catch (e) {
+    /* 静默 */
+  }
 }
 
 function formatSpeed(bps) {
@@ -301,7 +319,7 @@ async function confirmBatch(opt) {
   const ids = s.ids
   if (!ids.length) return
   try {
-    if (filter.value === 'downloading') {
+    if (filter.value === 'downloading' || filter.value === 'waiting') {
       await BatchCancel(ids)
     } else {
       // 先记录到 removedIds，防止后端迟到的 task:update 把已删任务重新加回列表
@@ -429,8 +447,9 @@ function setupViewport() {
   resizeObserver.observe(el)
 }
 
-// 新建下载成功后，刷新任务列表并切回「下载管理」
+// 新建下载成功后，刷新任务列表并切回「下载管理」的「下载中」标签。
 function onAdded() {
+  filter.value = 'downloading'
   loadTasks()
   currentNav.value = 'download'
 }
@@ -459,6 +478,11 @@ onMounted(async () => {
   })
   const offAvailable = EventsOn('update:available', (info) => showUpdate(info))
   await loadTasks()
+  try {
+    appVersion.value = await GetVersion()
+  } catch (e) {
+    /* 静默 */
+  }
   doUpdateCheck() // 启动兜底检查（事件丢失时依然弹出）
   setupViewport()
   measure()
@@ -505,6 +529,7 @@ onUnmounted(() => {
         <button class="sb-item settings" @click="showSettings = true">
           <span class="sb-ico">⚙</span>
           <span class="sb-label">设置</span>
+          <span v-if="appVersion" class="sb-version" :title="'当前版本 v' + appVersion + '，点击检查更新'" @click.stop="doUpdateCheck">v{{ appVersion }}</span>
         </button>
       </div>
     </aside>
@@ -575,7 +600,7 @@ onUnmounted(() => {
           <span class="batch-count">已选 {{ selectedCount }}</span>
           <div class="batch-actions">
             <button
-              v-if="filter === 'downloading'"
+              v-if="filter === 'downloading' || filter === 'waiting'"
               class="batch-btn"
               :disabled="!selectedCount"
               @click="batchCancel"
@@ -685,6 +710,10 @@ onUnmounted(() => {
 
         <footer class="statbar">
           <span>共 {{ stats.total }} 个任务</span>
+          <span class="dot">·</span>
+          <span>下载中 {{ stats.active }}/{{ maxTasks }}</span>
+          <span class="dot">·</span>
+          <span>等待 {{ stats.waiting }}</span>
           <span class="dot">·</span>
           <span>已完成 {{ stats.done }}</span>
           <span class="dot">·</span>
@@ -808,6 +837,19 @@ onUnmounted(() => {
 .sb-footer .sb-item.settings {
   width: 100%;
   box-sizing: border-box;
+}
+.sb-version {
+  font-size: 10.5px;
+  color: #67738a;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 5px;
+  padding: 1px 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.sb-version:hover {
+  color: #c7d0dc;
+  background: rgba(255, 255, 255, 0.12);
 }
 
 /* ===== 右侧主区 ===== */

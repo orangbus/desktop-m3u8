@@ -61,3 +61,50 @@ export namespace core {
 
 }
 
+export namespace main {
+	
+	export class UpdateInfo {
+	    hasUpdate: boolean;
+	    current: string;
+	    latest: string;
+	    notes: string;
+	    htmlUrl: string;
+	    assetName: string;
+	    downloadUrl: string;
+	    assetSize: number;
+	    platform: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hasUpdate = source["hasUpdate"];
+	        this.current = source["current"];
+	        this.latest = source["latest"];
+	        this.notes = source["notes"];
+	        this.htmlUrl = source["htmlUrl"];
+	        this.assetName = source["assetName"];
+	        this.downloadUrl = source["downloadUrl"];
+	        this.assetSize = source["assetSize"];
+	        this.platform = source["platform"];
+	    }
+	}
+	export class UpdateResult {
+	    status: string;
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.status = source["status"];
+	        this.path = source["path"];
+	    }
+	}
+
+}
+

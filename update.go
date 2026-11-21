@@ -31,7 +31,7 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	appVersion    = "1.0.3"
+	appVersion    = "1.0.4"
 	updateRepoAPI = "https://api.github.com/repos/orangbus/desktop-m3u8/releases/latest"
 	updateRepoURL = "https://github.com/orangbus/desktop-m3u8/releases/latest"
 )
@@ -59,9 +59,9 @@ type UpdateResult struct {
 
 // ghRelease GitHub Releases API 返回结构（只取需要的字段）。
 type ghRelease struct {
-	TagName string `json:"tag_name"`
-	HTMLURL string `json:"html_url"`
-	Body    string `json:"body"`
+	TagName string    `json:"tag_name"`
+	HTMLURL string    `json:"html_url"`
+	Body    string    `json:"body"`
 	Assets  []ghAsset `json:"assets"`
 }
 
@@ -112,6 +112,11 @@ func (a *App) checkUpdate() *UpdateInfo {
 // CheckUpdate 供前端手动触发一次版本检查。
 func (a *App) CheckUpdate() *UpdateInfo {
 	return a.checkUpdate()
+}
+
+// GetVersion 返回当前内置版本号（供前端左下角设置区展示）。
+func (a *App) GetVersion() string {
+	return appVersion
 }
 
 // OpenReleasePage 用系统浏览器打开 GitHub Releases 页面。
